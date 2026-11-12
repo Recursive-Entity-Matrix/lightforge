@@ -62,6 +62,9 @@ impl Lightforge {
 
             Message::GameExited(code, result) => {
                 self.playing.retain(|s| s.code != code);
+                if let Some(discord) = &self.discord {
+                    discord.game_exited(code.clone());
+                }
                 if self.stop_dialog.as_ref().is_some_and(|d| d.code == code) {
                     self.stop_dialog = None;
                 }

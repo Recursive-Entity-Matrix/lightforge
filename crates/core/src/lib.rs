@@ -21,6 +21,7 @@ pub mod companion;
 pub mod config;
 pub(crate) mod cvars;
 pub mod debug;
+pub mod discord;
 pub mod discover;
 pub mod doctor;
 pub mod error;

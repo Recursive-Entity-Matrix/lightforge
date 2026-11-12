@@ -67,12 +67,45 @@ pub(crate) fn play(ctx: Ctx, code: ProductCode, proton: Option<String>, dry_run:
     print_preflight(&report);
     owe_gui_client(&config, &report);
 
-    let status = lightforge_core::launch_options::wrap(
+    let mut cmd = lightforge_core::launch_options::wrap(
         lightforge_core::tweaks::wrapped(runner.command("run", &exe, Vec::<String>::new()), &wrappers),
         &profile.launch_options,
-    )
-    .status()
-    .context("launching the game")?;
+    );
+
+    let status = if config.discord_rpc {
+        let session = lightforge_core::discord::DiscordRpcSession::start(
+            true,
+            config.discord_rpc_character,
+        );
+        let start_secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let name = exe
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "game".into());
+
+        let mut child = cmd.spawn().context("launching the game")?;
+        let custom_app_id = config
+            .product(&code)
+            .and_then(|p| p.profile.discord_app_id.clone())
+            .or_else(|| config.discord_app_id.clone());
+        session.game_started(
+            code.clone(),
+            name,
+            child.id(),
+            start_secs,
+            Some(layout.product_dir(&code)),
+            custom_app_id,
+        );
+        let status = child.wait().context("waiting for the game")?;
+        session.game_exited(code);
+        session.shutdown();
+        status
+    } else {
+        cmd.status().context("launching the game")?
+    };
     match status.code() {
         Some(0) | None => println!("exited"),
         Some(code) => println!("exited with code {code}"),

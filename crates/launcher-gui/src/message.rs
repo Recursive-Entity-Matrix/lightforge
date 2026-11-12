@@ -376,6 +376,10 @@ pub(crate) enum Message {
     GameLanguage(String),
     /// Whether the launcher gets out of the way once a game is up.
     MinimizeOnLaunch(bool),
+    /// Whether Discord Rich Presence is enabled.
+    DiscordRpc(bool),
+    /// Whether Discord Rich Presence includes character and realm names.
+    DiscordRpcCharacter(bool),
     /// An interface size was picked in Settings › General.
     InterfaceSize(InterfaceSizeChoice),
     /// Whether a Battle.net hand-off puts the client in the tray.

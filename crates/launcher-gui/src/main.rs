@@ -455,6 +455,8 @@ struct Lightforge {
     /// Games of ours that are up, at most one per product: its tile's PLAY
     /// is STOP until it exits. Another product can still be launched.
     playing: Vec<Session>,
+    /// Background Discord Rich Presence manager.
+    discord: Option<lightforge_core::discord::DiscordRpcSession>,
     stop_dialog: Option<StopDialog>,
     version_dialog: Option<VersionDialog>,
     modify_dialog: Option<ModifyDialog>,

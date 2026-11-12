@@ -143,6 +143,34 @@ impl Lightforge {
             ]),
             setting_group([
                 setting(
+                    "Discord Rich Presence",
+                    "Shows what game you are playing on Discord.",
+                    self.hint(
+                        "Lightforge communicates directly with your local Discord client \
+                         via a local IPC socket. It only runs for the game itself, never for \
+                         the Battle.net launcher, and stays completely outside the game's memory.",
+                    ),
+                    switch("discord rpc", self.config.discord_rpc, Message::DiscordRpc),
+                ),
+                match self.config.discord_rpc {
+                    true => setting(
+                        "Show character and realm in Discord",
+                        "Includes your character and realm name when playing World of Warcraft.",
+                        self.hint(
+                            "Discovered non-invasively from your WTF settings and account folder.",
+                        ),
+                        switch("discord character", self.config.discord_rpc_character, Message::DiscordRpcCharacter),
+                    ),
+                    false => setting(
+                        "Show character and realm in Discord",
+                        "Off while Discord Rich Presence is disabled.",
+                        None,
+                        iced::widget::toggler(false).size(theme::tap_text(20.0)).style(theme::switch),
+                    ),
+                },
+            ]),
+            setting_group([
+                setting(
                     "What's new after an update",
                     "Once per version. The notes are always under Lightforge Updates.",
                     None,

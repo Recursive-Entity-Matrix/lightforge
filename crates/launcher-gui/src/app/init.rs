@@ -69,6 +69,10 @@ impl Lightforge {
             .map(|dirs| Pipeline::new(config.asset_origin(), Store::new(dirs.asset_cache_dir())));
 
         let limit_input = config.download_limit_mbps.map(|v| v.to_string()).unwrap_or_default();
+        let discord = Some(lightforge_core::discord::DiscordRpcSession::start(
+            config.discord_rpc,
+            config.discord_rpc_character,
+        ));
         Self {
             layout,
             dirs,
@@ -189,6 +193,7 @@ impl Lightforge {
             discarding: None,
             launching: None,
             playing: Vec::new(),
+            discord,
             stop_dialog: None,
             version_dialog: None,
             modify_dialog: None,

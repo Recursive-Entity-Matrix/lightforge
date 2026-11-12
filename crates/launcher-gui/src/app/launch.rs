@@ -41,6 +41,22 @@ impl Lightforge {
         self.status = format!("{} is running", game.name);
         self.playing.retain(|s| s.code != code);
         self.playing.push(Session { code: code.clone(), game: game.clone(), stopping: false });
+        if let Some(discord) = &self.discord {
+            let start_secs = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            let product_dir = match Kind::of(&code) {
+                Kind::Managed => Some(self.layout.product_dir(&code)),
+                Kind::HandOff => None,
+            };
+            let custom_app_id = self
+                .config
+                .product(&code)
+                .and_then(|p| p.profile.discord_app_id.clone())
+                .or_else(|| self.config.discord_app_id.clone());
+            discord.game_started(code.clone(), game.name.clone(), game.pid, start_secs, product_dir, custom_app_id);
+        }
         // After the game, so its pre-flight is long done and cannot end them.
         let companions: Vec<Task<Message>> = self
             .config

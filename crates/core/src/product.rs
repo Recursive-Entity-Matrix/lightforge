@@ -580,6 +580,9 @@ pub struct ProductProfile {
     pub install_dir: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub executable: Option<String>,
+    /// Optional custom Discord Application ID for this game in Discord Rich Presence.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub discord_app_id: Option<String>,
 }
 
 /// Lifecycle of a product's Wine/Proton prefix.

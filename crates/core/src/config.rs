@@ -67,6 +67,15 @@ pub struct Config {
     /// Whether launching a game also pauses downloads for *other* products.
     /// The launched product's own is always paused.
     pub pause_downloads_while_playing: bool,
+    /// Whether to broadcast game activity to Discord via Rich Presence. Off by default.
+    #[serde(default)]
+    pub discord_rpc: bool,
+    /// Whether Discord Rich Presence includes character and realm names when available.
+    #[serde(default = "yes")]
+    pub discord_rpc_character: bool,
+    /// Optional global custom Discord Application ID.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub discord_app_id: Option<String>,
     /// Whether the launcher minimizes once a game is up. Off by default;
     /// nothing is restored when the game exits.
     #[serde(default)]
@@ -183,6 +192,9 @@ impl Default for Config {
             contact: None,
             download_limit_mbps: None,
             pause_downloads_while_playing: true,
+            discord_rpc: false,
+            discord_rpc_character: true,
+            discord_app_id: None,
             minimize_on_launch: false,
             battle_net_minimized: true,
             close_battle_net_on_play: false,

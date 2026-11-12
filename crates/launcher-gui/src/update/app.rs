@@ -203,6 +203,24 @@ impl Lightforge {
                 Task::none()
             }
 
+            Message::DiscordRpc(on) => {
+                self.config.discord_rpc = on;
+                if let Some(discord) = &self.discord {
+                    discord.update_config(on, self.config.discord_rpc_character);
+                }
+                self.save_config();
+                Task::none()
+            }
+
+            Message::DiscordRpcCharacter(on) => {
+                self.config.discord_rpc_character = on;
+                if let Some(discord) = &self.discord {
+                    discord.update_config(self.config.discord_rpc, on);
+                }
+                self.save_config();
+                Task::none()
+            }
+
             Message::CloseBattleNetOnPlay(on) => {
                 self.config.close_battle_net_on_play = on;
                 self.save_config();
