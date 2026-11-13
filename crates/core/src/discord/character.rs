@@ -8,42 +8,85 @@ use std::io::{self, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
+/// Classification of in-game location.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LocationKind {
+    Continent,
+    Dungeon,
+    Raid,
+    Battleground,
+    Unknown,
+}
+
+/// Location information parsed from client logs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LocationInfo {
+    pub name: String,
+    pub kind: LocationKind,
+}
+
 /// Detected World of Warcraft character presence information.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CharacterInfo {
     /// Character name, formatted for display (hyphens replaced by spaces).
     /// `None` when the player is on the character selection screen.
     pub character: Option<String>,
+    /// Character class (e.g. "Hunter", "Druid"), if detected.
+    pub class: Option<String>,
+    /// Character level (e.g. 25), if detected from SavedVariables.
+    pub level: Option<u32>,
     /// Realm name (e.g. "Silvermoon") or ruleset for realm-less editions like Forever (e.g. "PvE").
     pub realm: String,
+    /// Location (continent, dungeon, raid, battleground), if detected from logs.
+    pub location: Option<LocationInfo>,
     /// Whether the player is actively in the game world (vs Character Select / loading).
     pub in_world: bool,
 }
 
 impl CharacterInfo {
-    /// Formatted status string suitable for Discord Rich Presence state or details.
-    pub fn format_state(&self) -> String {
+    /// Formatted details string for Discord Rich Presence line 1.
+    pub fn format_details(&self) -> String {
         if self.in_world {
-            match &self.character {
-                Some(char_name) => {
-                    if self.realm.is_empty() {
-                        char_name.clone()
-                    } else {
-                        format!("{char_name} - {}", self.realm)
-                    }
-                }
-                None => {
-                    if self.realm.is_empty() {
-                        "In World".to_owned()
-                    } else {
-                        format!("In World - {}", self.realm)
-                    }
-                }
+            match (&self.character, &self.class, self.level) {
+                (Some(name), Some(cls), Some(lvl)) => format!("{name} - Lvl {lvl} {cls}"),
+                (Some(name), Some(cls), None) => format!("{name} - {cls}"),
+                (Some(name), None, Some(lvl)) => format!("{name} - Lvl {lvl}"),
+                (Some(name), None, None) => name.clone(),
+                (None, Some(cls), Some(lvl)) => format!("Lvl {lvl} {cls}"),
+                (None, Some(cls), None) => cls.clone(),
+                (None, None, _) => "In World".to_owned(),
             }
         } else if self.realm.is_empty() {
             "Character Select".to_owned()
         } else {
             format!("Character Select - {}", self.realm)
+        }
+    }
+
+    /// Formatted state string for Discord Rich Presence line 2.
+    pub fn format_state(&self) -> String {
+        if self.in_world {
+            let loc_str = match &self.location {
+                Some(loc) => match loc.kind {
+                    LocationKind::Dungeon => format!("In Dungeon: {}", loc.name),
+                    LocationKind::Raid => format!("In Raid: {}", loc.name),
+                    LocationKind::Battleground => format!("In BG: {}", loc.name),
+                    LocationKind::Continent | LocationKind::Unknown => {
+                        format!("In World - {}", loc.name)
+                    }
+                },
+                None => "In World".to_owned(),
+            };
+
+            if self.realm.is_empty() {
+                loc_str
+            } else if loc_str == "In World" {
+                format!("In World - {}", self.realm)
+            } else {
+                format!("{loc_str} ({})", self.realm)
+            }
+        } else {
+            "In Game".to_owned()
         }
     }
 }
@@ -373,6 +416,383 @@ fn resolve_realm_display(
     "PvE".to_string()
 }
 
+/// Resolve class ID (from CVar EJLootClass) to display name.
+pub fn class_name_from_id(id: u32) -> Option<&'static str> {
+    match id {
+        1 => Some("Warrior"),
+        2 => Some("Paladin"),
+        3 => Some("Hunter"),
+        4 => Some("Rogue"),
+        5 => Some("Priest"),
+        6 => Some("Death Knight"),
+        7 => Some("Shaman"),
+        8 => Some("Mage"),
+        9 => Some("Warlock"),
+        10 => Some("Monk"),
+        11 => Some("Druid"),
+        12 => Some("Demon Hunter"),
+        13 => Some("Evoker"),
+        _ => None,
+    }
+}
+
+/// Detect character class from character's `config-cache.wtf` or `SavedVariables`.
+pub fn parse_character_class(
+    char_dir: &Path,
+    account_dir: &Path,
+    char_name: &str,
+) -> Option<String> {
+    // 1. Native config-cache.wtf: SET EJLootClass "<id>"
+    for config_name in &["config-cache.wtf", "config-cache.old"] {
+        let p = char_dir.join(config_name);
+        if let Some(val) = crate::cvars::get(&p, "EJLootClass") {
+            if let Ok(id) = val.parse::<u32>() {
+                if let Some(name) = class_name_from_id(id) {
+                    return Some(name.to_string());
+                }
+            }
+        }
+    }
+
+    // 2. Scan SavedVariables for class name or class ID associated with character
+    let raw_name = char_dir
+        .file_name()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let name_prefix = raw_name.split('-').next().unwrap_or(char_name);
+
+    let sv_dir = account_dir.join("SavedVariables");
+    if sv_dir.is_dir() {
+        if let Ok(entries) = fs::read_dir(&sv_dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.extension().is_some_and(|ext| ext == "lua") {
+                    if let Ok(content) = fs::read_to_string(&path) {
+                        let lower_content = content.to_ascii_lowercase();
+                        let lower_prefix = name_prefix.to_ascii_lowercase();
+                        if !lower_content.contains(&lower_prefix) {
+                            continue;
+                        }
+                        for line in content.lines() {
+                            let lower = line.to_ascii_lowercase();
+                            if lower.contains("class") {
+                                for id in 1..=13 {
+                                    if let Some(cname) = class_name_from_id(id) {
+                                        let cname_lower = cname.to_ascii_lowercase();
+                                        if lower.contains(&format!("\"{cname_lower}\""))
+                                            || lower.contains(&format!("'{cname_lower}'"))
+                                            || lower.contains(&format!("classnum\"] = {id}"))
+                                            || lower.contains(&format!("class_id\"] = {id}"))
+                                        {
+                                            return Some(cname.to_string());
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    None
+}
+
+/// Detect character level from SavedVariables.
+pub fn parse_character_level(
+    char_dir: &Path,
+    account_dir: &Path,
+    char_name: &str,
+) -> Option<u32> {
+    let raw_name = char_dir
+        .file_name()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let name_prefix = raw_name.split('-').next().unwrap_or(char_name).to_string();
+    let display_name = format_character_name(&raw_name);
+
+    let search_dirs = [char_dir.join("SavedVariables"), account_dir.join("SavedVariables")];
+
+    for dir in &search_dirs {
+        if !dir.is_dir() {
+            continue;
+        }
+        if let Ok(entries) = fs::read_dir(dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.extension().is_some_and(|ext| ext == "lua") {
+                    if let Ok(content) = fs::read_to_string(&path) {
+                        let lower_content = content.to_ascii_lowercase();
+                        let lower_name = display_name.to_ascii_lowercase();
+                        let lower_prefix = name_prefix.to_ascii_lowercase();
+                        if !lower_content.contains(&lower_name) && !lower_content.contains(&lower_prefix) {
+                            continue;
+                        }
+
+                        let lines: Vec<&str> = content.lines().collect();
+                        for (i, line) in lines.iter().enumerate() {
+                            let line_lower = line.to_ascii_lowercase();
+                            if line_lower.contains(&lower_name) || line_lower.contains(&lower_prefix) {
+                                let window_end = (i + 50).min(lines.len());
+                                for candidate_line in &lines[i..window_end] {
+                                    let trimmed = candidate_line.trim();
+                                    if trimmed.contains("level") {
+                                        if let Some(eq_idx) = trimmed.find('=') {
+                                            let after_eq = trimmed[eq_idx + 1..].trim();
+                                            let num_str: String = after_eq
+                                                .chars()
+                                                .take_while(|c| c.is_ascii_digit())
+                                                .collect();
+                                            if let Ok(lvl) = num_str.parse::<u32>() {
+                                                if (1..=100).contains(&lvl) {
+                                                    return Some(lvl);
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    None
+}
+
+/// Resolve Map ID to LocationInfo (Continent, Dungeon, Raid, Battleground).
+pub fn resolve_map_id(map_id: u32) -> LocationInfo {
+    match map_id {
+        // Continents
+        0 => LocationInfo {
+            name: "Eastern Kingdoms".to_string(),
+            kind: LocationKind::Continent,
+        },
+        1 => LocationInfo {
+            name: "Kalimdor".to_string(),
+            kind: LocationKind::Continent,
+        },
+        530 => LocationInfo {
+            name: "Outland".to_string(),
+            kind: LocationKind::Continent,
+        },
+        571 => LocationInfo {
+            name: "Northrend".to_string(),
+            kind: LocationKind::Continent,
+        },
+        870 => LocationInfo {
+            name: "Pandaria".to_string(),
+            kind: LocationKind::Continent,
+        },
+        1116 => LocationInfo {
+            name: "Draenor".to_string(),
+            kind: LocationKind::Continent,
+        },
+        1220 => LocationInfo {
+            name: "Broken Isles".to_string(),
+            kind: LocationKind::Continent,
+        },
+        1642 => LocationInfo {
+            name: "Zandalar".to_string(),
+            kind: LocationKind::Continent,
+        },
+        1643 => LocationInfo {
+            name: "Kul Tiras".to_string(),
+            kind: LocationKind::Continent,
+        },
+        2222 => LocationInfo {
+            name: "Shadowlands".to_string(),
+            kind: LocationKind::Continent,
+        },
+        2444 => LocationInfo {
+            name: "Dragon Isles".to_string(),
+            kind: LocationKind::Continent,
+        },
+        2552 => LocationInfo {
+            name: "Khaz Algar".to_string(),
+            kind: LocationKind::Continent,
+        },
+
+        // Classic Dungeons
+        33 => LocationInfo {
+            name: "Shadowfang Keep".to_string(),
+            kind: LocationKind::Dungeon,
+        },
+        34 => LocationInfo {
+            name: "The Stockade".to_string(),
+            kind: LocationKind::Dungeon,
+        },
+        36 => LocationInfo {
+            name: "Deadmines".to_string(),
+            kind: LocationKind::Dungeon,
+        },
+        43 => LocationInfo {
+            name: "Wailing Caverns".to_string(),
+            kind: LocationKind::Dungeon,
+        },
+        47 => LocationInfo {
+            name: "Razorfen Kraul".to_string(),
+            kind: LocationKind::Dungeon,
+        },
+        48 => LocationInfo {
+            name: "Blackfathom Deeps".to_string(),
+            kind: LocationKind::Dungeon,
+        },
+        70 => LocationInfo {
+            name: "Uldaman".to_string(),
+            kind: LocationKind::Dungeon,
+        },
+        90 => LocationInfo {
+            name: "Gnomeregan".to_string(),
+            kind: LocationKind::Dungeon,
+        },
+        109 => LocationInfo {
+            name: "Sunken Temple".to_string(),
+            kind: LocationKind::Dungeon,
+        },
+        129 => LocationInfo {
+            name: "Razorfen Downs".to_string(),
+            kind: LocationKind::Dungeon,
+        },
+        189 => LocationInfo {
+            name: "Scarlet Monastery".to_string(),
+            kind: LocationKind::Dungeon,
+        },
+        209 => LocationInfo {
+            name: "Zul'Farrak".to_string(),
+            kind: LocationKind::Dungeon,
+        },
+        229 => LocationInfo {
+            name: "Blackrock Spire".to_string(),
+            kind: LocationKind::Dungeon,
+        },
+        230 => LocationInfo {
+            name: "Blackrock Depths".to_string(),
+            kind: LocationKind::Dungeon,
+        },
+        289 => LocationInfo {
+            name: "Scholomance".to_string(),
+            kind: LocationKind::Dungeon,
+        },
+        329 => LocationInfo {
+            name: "Stratholme".to_string(),
+            kind: LocationKind::Dungeon,
+        },
+        349 => LocationInfo {
+            name: "Maraudon".to_string(),
+            kind: LocationKind::Dungeon,
+        },
+        389 => LocationInfo {
+            name: "Ragefire Chasm".to_string(),
+            kind: LocationKind::Dungeon,
+        },
+        429 => LocationInfo {
+            name: "Dire Maul".to_string(),
+            kind: LocationKind::Dungeon,
+        },
+
+        // Classic Raids
+        309 => LocationInfo {
+            name: "Zul'Gurub".to_string(),
+            kind: LocationKind::Raid,
+        },
+        409 => LocationInfo {
+            name: "Molten Core".to_string(),
+            kind: LocationKind::Raid,
+        },
+        469 => LocationInfo {
+            name: "Blackwing Lair".to_string(),
+            kind: LocationKind::Raid,
+        },
+        509 => LocationInfo {
+            name: "Ruins of Ahn'Qiraj".to_string(),
+            kind: LocationKind::Raid,
+        },
+        531 => LocationInfo {
+            name: "Temple of Ahn'Qiraj".to_string(),
+            kind: LocationKind::Raid,
+        },
+        533 => LocationInfo {
+            name: "Naxxramas".to_string(),
+            kind: LocationKind::Raid,
+        },
+
+        // Battlegrounds
+        30 => LocationInfo {
+            name: "Alterac Valley".to_string(),
+            kind: LocationKind::Battleground,
+        },
+        489 => LocationInfo {
+            name: "Warsong Gulch".to_string(),
+            kind: LocationKind::Battleground,
+        },
+        529 => LocationInfo {
+            name: "Arathi Basin".to_string(),
+            kind: LocationKind::Battleground,
+        },
+
+        other => LocationInfo {
+            name: format!("Map {other}"),
+            kind: LocationKind::Unknown,
+        },
+    }
+}
+
+/// Parse the active map / continent / dungeon from `Logs/Client.log`.
+pub fn parse_location_from_client_log(
+    logs_dir: &Path,
+    start_secs: Option<u64>,
+) -> Option<LocationInfo> {
+    let path = if logs_dir.join("Client.log").is_file() {
+        logs_dir.join("Client.log")
+    } else if logs_dir.join("client.log").is_file() {
+        logs_dir.join("client.log")
+    } else {
+        return None;
+    };
+
+    if let Some(s) = start_secs {
+        if let Ok(metadata) = path.metadata() {
+            if let Ok(mtime) = metadata.modified() {
+                let start_time = SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(s);
+                if mtime < start_time {
+                    return None;
+                }
+            }
+        }
+    }
+
+    let content = read_log_tail(&path, 65536).ok()?;
+    if content.trim().is_empty() {
+        return None;
+    }
+
+    for line in content.lines().rev() {
+        // Pattern 1: Client : Load Map Begin : <MapID>
+        if let Some(idx) = line.find("Load Map Begin :") {
+            let rest = line[idx + 16..].trim();
+            let num_str: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+            if let Ok(map_id) = num_str.parse::<u32>() {
+                return Some(resolve_map_id(map_id));
+            }
+        }
+
+        // Pattern 2: ClientNewWorld (map <MapID>)
+        if let Some(idx) = line.find("(map ") {
+            let rest = line[idx + 5..].trim();
+            let num_str: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+            if let Ok(map_id) = num_str.parse::<u32>() {
+                return Some(resolve_map_id(map_id));
+            }
+        }
+    }
+
+    None
+}
+
 fn get_folder_latest_mtime(folder: &Path) -> SystemTime {
     let mut latest = folder
         .metadata()
@@ -450,7 +870,10 @@ pub fn detect_character_with_start_time(
         };
         CharacterInfo {
             character: None,
+            class: None,
+            level: None,
             realm: display_realm,
+            location: None,
             in_world: false,
         }
     })
@@ -540,7 +963,10 @@ fn scan_account_dir(
     if char_folders.is_empty() {
         return Some(CharacterInfo {
             character: None,
+            class: None,
+            level: None,
             realm: display_realm,
+            location: None,
             in_world: false,
         });
     }
@@ -560,7 +986,10 @@ fn scan_account_dir(
     if is_launch_phase {
         return Some(CharacterInfo {
             character: None,
+            class: None,
+            level: None,
             realm: display_realm,
+            location: None,
             in_world: false,
         });
     }
@@ -570,15 +999,25 @@ fn scan_account_dir(
         if !log.in_world {
             return Some(CharacterInfo {
                 character: None,
+                class: None,
+                level: None,
                 realm: display_realm,
+                location: None,
                 in_world: false,
             });
         }
         if let Some(guid) = log.guid_hex.as_deref() {
             if let Some(c) = resolve_guid_to_character(&active_acc_path, guid, &char_folders) {
+                let location = logs_dir.and_then(|d| parse_location_from_client_log(d, start_secs));
+                let char_dir = realm_path.join(&c);
+                let class = parse_character_class(&char_dir, &active_acc_path, &c);
+                let level = parse_character_level(&char_dir, &active_acc_path, &c);
                 return Some(CharacterInfo {
                     character: Some(format_character_name(&c)),
+                    class,
+                    level,
                     realm: display_realm,
+                    location,
                     in_world: true,
                 });
             }
@@ -612,7 +1051,10 @@ fn scan_account_dir(
                     if logout_elapsed < 15 {
                         return Some(CharacterInfo {
                             character: None,
+                            class: None,
+                            level: None,
                             realm: display_realm,
+                            location: None,
                             in_world: false,
                         });
                     }
@@ -634,9 +1076,17 @@ fn scan_account_dir(
             .unwrap_or_else(|| char_folders[0].clone()),
     };
 
+    let location = logs_dir.and_then(|d| parse_location_from_client_log(d, start_secs));
+    let char_dir = realm_path.join(&chosen_folder);
+    let class = parse_character_class(&char_dir, &active_acc_path, &chosen_folder);
+    let level = parse_character_level(&char_dir, &active_acc_path, &chosen_folder);
+
     Some(CharacterInfo {
         character: Some(format_character_name(&chosen_folder)),
+        class,
+        level,
         realm: display_realm,
+        location,
         in_world: true,
     })
 }
@@ -660,7 +1110,8 @@ mod tests {
         assert_eq!(info.realm, "Silvermoon");
         assert_eq!(info.character.as_deref(), Some("Arthas"));
         assert!(info.in_world);
-        assert_eq!(info.format_state(), "Arthas - Silvermoon");
+        assert_eq!(info.format_details(), "Arthas");
+        assert_eq!(info.format_state(), "In World - Silvermoon");
     }
 
     #[test]
@@ -693,7 +1144,8 @@ mod tests {
         assert_eq!(info.realm, "Silvermoon");
         assert_eq!(info.character.as_deref(), Some("Arthas"));
         assert!(info.in_world);
-        assert_eq!(info.format_state(), "Arthas - Silvermoon");
+        assert_eq!(info.format_details(), "Arthas");
+        assert_eq!(info.format_state(), "In World - Silvermoon");
     }
 
     #[test]
@@ -716,7 +1168,8 @@ mod tests {
         assert_eq!(info.realm, "Silvermoon");
         assert_eq!(info.character, None);
         assert!(!info.in_world);
-        assert_eq!(info.format_state(), "Character Select - Silvermoon");
+        assert_eq!(info.format_details(), "Character Select - Silvermoon");
+        assert_eq!(info.format_state(), "In Game");
     }
 
     #[test]
@@ -762,7 +1215,8 @@ mod tests {
         assert_eq!(info.realm, "PvE");
         assert_eq!(info.character.as_deref(), Some("Chompy Tyataza"));
         assert!(info.in_world);
-        assert_eq!(info.format_state(), "Chompy Tyataza - PvE");
+        assert_eq!(info.format_details(), "Chompy Tyataza");
+        assert_eq!(info.format_state(), "In World - PvE");
     }
 
     #[test]
@@ -803,7 +1257,8 @@ mod tests {
         let info2 = detect_character(temp.path()).unwrap();
         assert_eq!(info2.character, None);
         assert!(!info2.in_world);
-        assert_eq!(info2.format_state(), "Character Select - PvE");
+        assert_eq!(info2.format_details(), "Character Select - PvE");
+        assert_eq!(info2.format_state(), "In Game");
 
         // 3. Login as Tyataza
         let log3 = "Player-6796-01CD49A4: login\nActive Player Created\nClient Object Manager Destroyed\nPlayer-6796-006BD968: login\nActive Player Created\n";
@@ -812,7 +1267,8 @@ mod tests {
         let info3 = detect_character(temp.path()).unwrap();
         assert_eq!(info3.character.as_deref(), Some("Tyataza Shu"));
         assert!(info3.in_world);
-        assert_eq!(info3.format_state(), "Tyataza Shu - PvE");
+        assert_eq!(info3.format_details(), "Tyataza Shu");
+        assert_eq!(info3.format_state(), "In World - PvE");
     }
 
     #[test]
@@ -834,13 +1290,15 @@ mod tests {
         assert_eq!(info.character, None);
         assert!(!info.in_world);
         assert_eq!(info.realm, "PvE");
-        assert_eq!(info.format_state(), "Character Select - PvE");
+        assert_eq!(info.format_details(), "Character Select - PvE");
+        assert_eq!(info.format_state(), "In Game");
 
         // Launched 30 seconds ago (>=20s, in world)
         let info_later = detect_character_with_start_time(temp.path(), Some(now - 30)).unwrap();
         assert_eq!(info_later.character.as_deref(), Some("Chompy Tyataza"));
         assert!(info_later.in_world);
-        assert_eq!(info_later.format_state(), "Chompy Tyataza - PvE");
+        assert_eq!(info_later.format_details(), "Chompy Tyataza");
+        assert_eq!(info_later.format_state(), "In World - PvE");
     }
 
     #[test]
@@ -867,13 +1325,15 @@ mod tests {
         let info_early = detect_character_with_start_time(temp.path(), Some(now - 5)).unwrap();
         assert_eq!(info_early.character, None);
         assert!(!info_early.in_world);
-        assert_eq!(info_early.format_state(), "Character Select - PvE");
+        assert_eq!(info_early.format_details(), "Character Select - PvE");
+        assert_eq!(info_early.format_state(), "In Game");
 
         // After launch phase: Chompy Tyataza in world
         let info_later = detect_character_with_start_time(temp.path(), Some(now - 30)).unwrap();
         assert_eq!(info_later.character.as_deref(), Some("Chompy Tyataza"));
         assert!(info_later.in_world);
-        assert_eq!(info_later.format_state(), "Chompy Tyataza - PvE");
+        assert_eq!(info_later.format_details(), "Chompy Tyataza");
+        assert_eq!(info_later.format_state(), "In World - PvE");
     }
 
     #[test]
@@ -903,7 +1363,8 @@ mod tests {
         let info = detect_character(temp.path()).unwrap();
         assert_eq!(info.character.as_deref(), Some("Tyataza Shu"));
         assert!(info.in_world);
-        assert_eq!(info.format_state(), "Tyataza Shu - PvE");
+        assert_eq!(info.format_details(), "Tyataza Shu");
+        assert_eq!(info.format_state(), "In World - PvE");
     }
 
     #[test]
@@ -913,5 +1374,121 @@ mod tests {
         assert_eq!(extract_ruleset("CAMWOW US1 Realm 3 RP-PvE"), Some("RP-PvE"));
         assert_eq!(extract_ruleset("CAMWOW Hardcore Season"), Some("Hardcore"));
         assert_eq!(extract_ruleset("Silvermoon"), None);
+    }
+
+    #[test]
+    fn detects_class_from_config_cache() {
+        let temp = tempfile::tempdir().unwrap();
+        let char_dir = temp.path().join("Account/12345#1/91/Chompy-Tyataza");
+        fs::create_dir_all(&char_dir).unwrap();
+        fs::write(char_dir.join("config-cache.wtf"), "SET EJLootClass \"3\"\n").unwrap();
+
+        let class = parse_character_class(&char_dir, temp.path(), "Chompy Tyataza");
+        assert_eq!(class.as_deref(), Some("Hunter"));
+    }
+
+    #[test]
+    fn detects_level_from_saved_variables() {
+        let temp = tempfile::tempdir().unwrap();
+        let acc_dir = temp.path().join("Account/12345#1");
+        let char_dir = acc_dir.join("91/Chompy-Tyataza");
+        let sv_dir = acc_dir.join("SavedVariables");
+        fs::create_dir_all(&char_dir).unwrap();
+        fs::create_dir_all(&sv_dir).unwrap();
+
+        let lua_data = "ZygorData = {\n\
+            [\"Chompy\"] = {\n\
+                [\"level\"] = 25,\n\
+                [\"class\"] = \"HUNTER\",\n\
+            },\n\
+        }\n";
+        fs::write(sv_dir.join("Zygor.lua"), lua_data).unwrap();
+
+        let level = parse_character_level(&char_dir, &acc_dir, "Chompy-Tyataza");
+        assert_eq!(level, Some(25));
+    }
+
+    #[test]
+    fn detects_dungeon_location_from_client_log() {
+        let temp = tempfile::tempdir().unwrap();
+        let logs = temp.path().join("Logs");
+        fs::create_dir_all(&logs).unwrap();
+
+        let log = "Client : Load Map Begin : 36\nClient : Load Map End\n";
+        fs::write(logs.join("Client.log"), log).unwrap();
+
+        let loc = parse_location_from_client_log(&logs, None).unwrap();
+        assert_eq!(loc.name, "Deadmines");
+        assert_eq!(loc.kind, LocationKind::Dungeon);
+    }
+
+    #[test]
+    fn detects_continent_location_from_client_log() {
+        let temp = tempfile::tempdir().unwrap();
+        let logs = temp.path().join("Logs");
+        fs::create_dir_all(&logs).unwrap();
+
+        let log = "0000000000000000: ignoring outdated/duplicate ClientNewWorld (map 0) stamp=1\n";
+        fs::write(logs.join("Client.log"), log).unwrap();
+
+        let loc = parse_location_from_client_log(&logs, None).unwrap();
+        assert_eq!(loc.name, "Eastern Kingdoms");
+        assert_eq!(loc.kind, LocationKind::Continent);
+    }
+
+    #[test]
+    fn formats_enriched_details_and_state() {
+        let info_dungeon = CharacterInfo {
+            character: Some("Chompy Tyataza".to_string()),
+            class: Some("Hunter".to_string()),
+            level: Some(25),
+            realm: "PvE".to_string(),
+            location: Some(LocationInfo {
+                name: "Deadmines".to_string(),
+                kind: LocationKind::Dungeon,
+            }),
+            in_world: true,
+        };
+        assert_eq!(info_dungeon.format_details(), "Chompy Tyataza - Lvl 25 Hunter");
+        assert_eq!(info_dungeon.format_state(), "In Dungeon: Deadmines (PvE)");
+
+        let info_continent = CharacterInfo {
+            character: Some("Chompy Tyataza".to_string()),
+            class: Some("Hunter".to_string()),
+            level: Some(25),
+            realm: "PvE".to_string(),
+            location: Some(LocationInfo {
+                name: "Eastern Kingdoms".to_string(),
+                kind: LocationKind::Continent,
+            }),
+            in_world: true,
+        };
+        assert_eq!(info_continent.format_details(), "Chompy Tyataza - Lvl 25 Hunter");
+        assert_eq!(info_continent.format_state(), "In World - Eastern Kingdoms (PvE)");
+    }
+
+    #[test]
+    fn gracefully_degrades_when_level_or_location_missing() {
+        let info = CharacterInfo {
+            character: Some("Chompy Tyataza".to_string()),
+            class: Some("Hunter".to_string()),
+            level: None,
+            realm: "PvE".to_string(),
+            location: None,
+            in_world: true,
+        };
+        assert_eq!(info.format_details(), "Chompy Tyataza - Hunter");
+        assert_eq!(info.format_state(), "In World - PvE");
+
+        let info_bare = CharacterInfo {
+            character: Some("Chompy Tyataza".to_string()),
+            class: None,
+            level: None,
+            realm: "Silvermoon".to_string(),
+            location: None,
+            in_world: true,
+        };
+        assert_eq!(info_bare.format_details(), "Chompy Tyataza");
+        assert_eq!(info_bare.format_state(), "In World - Silvermoon");
     }
 }

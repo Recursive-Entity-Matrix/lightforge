@@ -112,7 +112,11 @@ fn run_worker(rx: Receiver<Command>, mut enabled: bool, mut include_character: b
         // Wait for next command or poll timeout for periodic reconnects / presence refresh
         match rx.recv_timeout(LOOP_POLL_TIMEOUT) {
             Ok(Command::GameStarted(game)) => {
-                tracing::info!("Discord RPC received GameStarted for {} (pid {})", game.name, game.pid);
+                tracing::info!(
+                    "Discord RPC received GameStarted for {} (pid {})",
+                    game.name,
+                    game.pid
+                );
                 games.retain(|g| g.code != game.code);
                 games.push(game);
                 dirty = true;
@@ -224,28 +228,25 @@ fn build_activity(game: &ActiveGame, app: &DiscordApp, include_character: bool) 
     };
 
     let (details, state) = match char_info {
-        Some(info) if info.in_world && info.character.is_some() => {
-            if app.title == app.default_details {
-                (Some(info.format_state()), Some("In World".to_owned()))
-            } else {
-                (Some(app.default_details.to_string()), Some(info.format_state()))
-            }
-        }
-        Some(info) => {
-            if app.title == app.default_details {
-                (Some(info.format_state()), Some("In Game".to_owned()))
-            } else {
-                (Some(app.default_details.to_string()), Some(info.format_state()))
-            }
-        }
+        Some(info) => (Some(info.format_details()), Some(info.format_state())),
         None => {
             if app.title == app.default_details {
                 (Some("In Game".to_owned()), None)
             } else {
-                (Some(app.default_details.to_string()), Some("In Game".to_owned()))
+                (
+                    Some(app.default_details.to_string()),
+                    Some("In Game".to_owned()),
+                )
             }
         }
     };
 
-    Activity::new(details, state, Some(game.start_secs))
+    let mut activity = Activity::new(details, state, Some(game.start_secs));
+    activity.assets = Some(super::activity::Assets {
+        large_image: None,
+        large_text: Some(app.title.clone()),
+        small_image: None,
+        small_text: None,
+    });
+    activity
 }
