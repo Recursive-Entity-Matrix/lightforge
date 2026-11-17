@@ -192,11 +192,14 @@ fn a_handed_off_game_is_whatever_is_not_battle_net_or_wine() {
         (r"C:\windows\system32\xalia.exe", "xalia.exe"),
         (r"C:\windows\system32\lsass.exe", "lsass.exe"),
         (r"C:\windows\system32\rundll32.exe", "rundll32.exe"),
+        (r"C:\Program Files (x86)\Battle.net\SystemSurvey.exe", "SystemSurvey.ex"),
+        (r"C:\Program Files (x86)\Battle.net\crashpad_handler.exe", "crashpad_handle"),
         ("python3", "python3"),
         ("/usr/bin/gamemoderun", "gamemoderun"),
     ] {
         assert_eq!(names_a_game(&argv(&[exe, "run"]), comm), None, "{exe} is not a game");
     }
+    assert_eq!(names_a_game(&[], "wine64-preloader"), None);
 
     // A browser child of the game is not a second game.
     assert_eq!(

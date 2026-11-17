@@ -9,7 +9,7 @@ pub struct DiscordApp {
     pub client_id: String,
     /// Game title shown in presence.
     pub title: String,
-    /// Default details string (e.g. expansion / branch name).
+    /// Default details string (e.g. branch name).
     pub default_details: String,
 }
 
@@ -72,23 +72,44 @@ pub fn resolve_game_app(code: &ProductCode, name: &str, custom_id: Option<&str>)
     let stem = lower_name.trim_end_matches(".exe");
     let code_str = code.as_str().trim().to_ascii_lowercase();
 
-    // 1. User-specified custom app ID override
-    if let Some(id) = custom_id {
-        let trimmed = id.trim();
-        if !trimmed.is_empty() {
-            let label = title_for_code_or_stem(code, &code_str, stem, clean_name);
-            return DiscordApp::new(trimmed, label.clone(), label);
+    let mut app = resolve_builtin_app(code, &code_str, stem, clean_name);
+
+    if let Some(id) = custom_id.map(str::trim).filter(|s| !s.is_empty()) {
+        app.client_id = id.to_owned();
+        if app.default_details == "Playing" {
+            app.default_details = app.title.clone();
         }
     }
 
-    // 2. Explicit WoW variants
+    app
+}
+
+/// Whether `code` / `name` refers to a World of Warcraft product (the only
+/// family where `WTF` / `Client.log` character detection applies).
+pub(crate) fn is_wow_app(app: &DiscordApp) -> bool {
+    matches!(
+        app.client_id.as_str(),
+        APP_ID_WOW | APP_ID_WOW_CLASSIC | APP_ID_WOW_PTR | APP_ID_WOW_FOREVER
+    )
+}
+
+fn matches_game(code_str: &str, stem: &str, exact: &[&str], substrings: &[&str]) -> bool {
+    exact.iter().any(|&k| code_str == k || stem == k)
+        || substrings
+            .iter()
+            .any(|&sub| code_str.contains(sub) || stem.contains(sub))
+}
+
+fn resolve_builtin_app(
+    code: &ProductCode,
+    code_str: &str,
+    stem: &str,
+    clean_name: &str,
+) -> DiscordApp {
+    // 1. Explicit WoW variants
     match code {
         ProductCode::Retail => {
-            return DiscordApp::new(
-                APP_ID_WOW,
-                "World of Warcraft",
-                "World of Warcraft: The War Within",
-            );
+            return DiscordApp::new(APP_ID_WOW, "World of Warcraft", "World of Warcraft");
         }
         ProductCode::Beta => {
             return DiscordApp::new(APP_ID_WOW, "World of Warcraft", "World of Warcraft: Beta");
@@ -145,30 +166,20 @@ pub fn resolve_game_app(code: &ProductCode, name: &str, custom_id: Option<&str>)
         ProductCode::Custom(_) => {}
     }
 
-    // 3. Match game family by either product code or process stem
-
-    // StarCraft II
-    if code_str == "s2"
-        || code_str == "sc2"
-        || code_str.contains("starcraft ii")
-        || code_str.contains("starcraft 2")
-        || code_str.contains("starcraft_2")
-        || stem == "s2"
-        || stem == "sc2"
-        || stem.contains("sc2")
-        || stem.contains("starcraft ii")
-        || stem.contains("starcraft 2")
-    {
+    // 2. Match Blizzard game families by TACT product code or process stem.
+    // Order matters where names overlap (e.g. StarCraft II and Remastered
+    // before StarCraft; Warcraft I/II/III before World of Warcraft).
+    if matches_game(
+        code_str,
+        stem,
+        &["s2", "sc2"],
+        &["sc2", "starcraft ii", "starcraft 2", "starcraft_2"],
+    ) {
         return DiscordApp::new(APP_ID_STARCRAFT_2, "StarCraft II", "StarCraft II");
     }
 
-    // StarCraft: Remastered (s1 is the official Battle.net TACT code for Remastered)
-    if code_str == "s1"
-        || code_str == "scr"
-        || code_str.contains("remaster")
-        || stem == "s1"
-        || stem.contains("remaster")
-    {
+    // s1 is the official Battle.net TACT code for StarCraft: Remastered.
+    if matches_game(code_str, stem, &["s1", "scr"], &["remaster"]) {
         return DiscordApp::new(
             APP_ID_STARCRAFT_REMASTERED,
             "StarCraft: Remastered",
@@ -176,69 +187,48 @@ pub fn resolve_game_app(code: &ProductCode, name: &str, custom_id: Option<&str>)
         );
     }
 
-    // StarCraft (Classic / original, e.g. sc.exe, starcraft.exe)
-    if code_str == "sc"
-        || code_str == "starcraft"
-        || stem == "sc"
-        || stem == "sc_x64"
-        || stem == "starcraft"
-        || stem == "starcraft_x64"
-        || stem == "starcraft64"
-        || stem.contains("starcraft")
-    {
+    if matches_game(
+        code_str,
+        stem,
+        &["sc", "sc_x64", "starcraft", "starcraft_x64", "starcraft64"],
+        &["starcraft"],
+    ) {
         return DiscordApp::new(APP_ID_STARCRAFT, "StarCraft", "StarCraft");
     }
 
-    // Hearthstone
-    if code_str == "hsb"
-        || code_str == "hs_beta"
-        || code_str == "wtcg"
-        || code_str.contains("hearthstone")
-        || stem == "hsb"
-        || stem == "wtcg"
-        || stem.contains("hearthstone")
-    {
+    if matches_game(
+        code_str,
+        stem,
+        &["hsb", "hs_beta", "wtcg"],
+        &["hearthstone"],
+    ) {
         return DiscordApp::new(APP_ID_HEARTHSTONE, "Hearthstone", "Hearthstone");
     }
 
-    // Diablo IV
-    if code_str == "fen"
-        || code_str == "d4"
-        || code_str.contains("diablo iv")
-        || code_str.contains("diablo 4")
-        || code_str.contains("diabloiv")
-        || stem == "fen"
-        || stem.contains("diablo iv")
-        || stem.contains("diablo 4")
-        || stem.contains("diabloiv")
-    {
+    if matches_game(
+        code_str,
+        stem,
+        &["fenris", "fen", "d4"],
+        &["diablo iv", "diablo 4", "diabloiv"],
+    ) {
         return DiscordApp::new(APP_ID_DIABLO_IV, "Diablo IV", "Diablo IV");
     }
 
-    // Diablo III
-    if code_str == "d3"
-        || code_str.contains("diablo iii")
-        || code_str.contains("diablo 3")
-        || code_str.contains("diabloiii")
-        || stem == "d3"
-        || stem.contains("diablo iii")
-        || stem.contains("diablo 3")
-        || stem.contains("diabloiii")
-    {
+    if matches_game(
+        code_str,
+        stem,
+        &["d3"],
+        &["diablo iii", "diablo 3", "diabloiii"],
+    ) {
         return DiscordApp::new(APP_ID_DIABLO_3, "Diablo III", "Diablo III");
     }
 
-    // Diablo II: Resurrected
-    if code_str == "osi"
-        || code_str == "d2r"
-        || code_str.contains("diablo ii")
-        || code_str.contains("diablo 2")
-        || code_str.contains("resurrected")
-        || stem == "osi"
-        || stem == "d2r"
-        || stem.contains("d2r")
-        || stem.contains("diablo ii")
-    {
+    if matches_game(
+        code_str,
+        stem,
+        &["osi", "d2r"],
+        &["d2r", "resurrected", "diablo ii", "diablo 2"],
+    ) {
         return DiscordApp::new(
             APP_ID_DIABLO_2_RESURRECTED,
             "Diablo II: Resurrected",
@@ -246,33 +236,33 @@ pub fn resolve_game_app(code: &ProductCode, name: &str, custom_id: Option<&str>)
         );
     }
 
-    // Diablo Immortal
-    if code_str == "anbs"
-        || code_str.contains("diablo immortal")
-        || code_str.contains("diabloimmortal")
-        || stem.contains("diablo immortal")
-        || stem.contains("diabloimmortal")
-    {
+    if matches_game(code_str, stem, &["d2"], &[]) {
+        return DiscordApp::new(APP_ID_DIABLO_2, "Diablo II", "Diablo II");
+    }
+
+    if matches_game(
+        code_str,
+        stem,
+        &["anbs"],
+        &["diablo immortal", "diabloimmortal"],
+    ) {
         return DiscordApp::new(APP_ID_DIABLO_IMMORTAL, "Diablo Immortal", "Diablo Immortal");
     }
 
-    // Overwatch 2
-    if code_str == "pro"
-        || code_str.contains("overwatch")
-        || stem == "pro"
-        || stem.contains("overwatch")
-    {
+    if matches_game(code_str, stem, &["d1", "diablo"], &[]) {
+        return DiscordApp::new(APP_ID_DIABLO_1, "Diablo", "Diablo");
+    }
+
+    if matches_game(code_str, stem, &["pro"], &["overwatch"]) {
         return DiscordApp::new(APP_ID_OVERWATCH_2, "Overwatch 2", "Overwatch 2");
     }
 
-    // Heroes of the Storm
-    if code_str == "hero"
-        || code_str.contains("heroes")
-        || code_str == "hots"
-        || stem == "hero"
-        || stem.contains("heroes of the storm")
-        || stem.contains("heroesofthestorm")
-    {
+    if matches_game(
+        code_str,
+        stem,
+        &["hero", "hots"],
+        &["heroes", "heroesofthestorm"],
+    ) {
         return DiscordApp::new(
             APP_ID_HEROES_OF_THE_STORM,
             "Heroes of the Storm",
@@ -280,18 +270,12 @@ pub fn resolve_game_app(code: &ProductCode, name: &str, custom_id: Option<&str>)
         );
     }
 
-    // Warcraft I: Remastered
-    if code_str == "w1r"
-        || code_str == "w1"
-        || code_str.contains("warcraft i:")
-        || code_str.contains("warcraft i ")
-        || code_str.contains("warcraft 1")
-        || stem == "w1r"
-        || stem == "w1"
-        || stem.contains("warcraft i:")
-        || stem.contains("warcraft i ")
-        || stem.contains("warcraft 1")
-    {
+    if matches_game(
+        code_str,
+        stem,
+        &["w1r", "w1", "warcraft", "warcraft i"],
+        &["warcraft i:", "warcraft i ", "warcraft 1"],
+    ) {
         return DiscordApp::new(
             APP_ID_WARCRAFT_1_REMASTERED,
             "Warcraft I: Remastered",
@@ -299,18 +283,12 @@ pub fn resolve_game_app(code: &ProductCode, name: &str, custom_id: Option<&str>)
         );
     }
 
-    // Warcraft II: Remastered
-    if code_str == "w2r"
-        || code_str == "w2"
-        || code_str.contains("warcraft ii:")
-        || code_str.contains("warcraft ii ")
-        || code_str.contains("warcraft 2")
-        || stem == "w2r"
-        || stem == "w2"
-        || stem.contains("warcraft ii:")
-        || stem.contains("warcraft ii ")
-        || stem.contains("warcraft 2")
-    {
+    if matches_game(
+        code_str,
+        stem,
+        &["w2r", "w2", "warcraft ii"],
+        &["warcraft ii:", "warcraft ii ", "warcraft 2"],
+    ) {
         return DiscordApp::new(
             APP_ID_WARCRAFT_2_REMASTERED,
             "Warcraft II: Remastered",
@@ -318,31 +296,12 @@ pub fn resolve_game_app(code: &ProductCode, name: &str, custom_id: Option<&str>)
         );
     }
 
-    // Warcraft III: Reforged
-    if code_str == "w3"
-        || code_str == "w3r"
-        || code_str.contains("reforged")
-        || stem == "w3"
-        || stem == "w3r"
-        || stem.contains("reforged")
-    {
-        return DiscordApp::new(
-            APP_ID_WARCRAFT_3_REFORGED,
-            "Warcraft III: Reforged",
-            "Warcraft III: Reforged",
-        );
-    }
-
-    // Warcraft III: Classic
-    if code_str == "war3"
-        || code_str == "wc3"
-        || code_str.contains("reign of chaos")
-        || code_str.contains("frozen throne")
-        || stem == "war3"
-        || stem == "wc3"
-        || stem.contains("reign of chaos")
-        || stem.contains("frozen throne")
-    {
+    if matches_game(
+        code_str,
+        stem,
+        &["war3", "wc3"],
+        &["reign of chaos", "frozen throne"],
+    ) {
         return DiscordApp::new(
             APP_ID_WARCRAFT_3_CLASSIC,
             "Warcraft III: Reign of Chaos",
@@ -350,12 +309,20 @@ pub fn resolve_game_app(code: &ProductCode, name: &str, custom_id: Option<&str>)
         );
     }
 
-    // WoW Forever
-    if code_str == "wowf"
-        || code_str.contains("forever")
-        || stem == "wowf"
-        || stem.contains("forever")
-    {
+    if matches_game(
+        code_str,
+        stem,
+        &["w3", "w3r", "warcraft iii"],
+        &["reforged", "warcraft iii", "warcraft 3"],
+    ) {
+        return DiscordApp::new(
+            APP_ID_WARCRAFT_3_REFORGED,
+            "Warcraft III: Reforged",
+            "Warcraft III: Reforged",
+        );
+    }
+
+    if matches_game(code_str, stem, &["wowf"], &["forever"]) {
         return DiscordApp::new(
             APP_ID_WOW_FOREVER,
             "World of Warcraft: Forever",
@@ -363,14 +330,7 @@ pub fn resolve_game_app(code: &ProductCode, name: &str, custom_id: Option<&str>)
         );
     }
 
-    // WoW PTR
-    if code_str.contains("ptr")
-        || code_str == "wowt"
-        || code_str == "wowxptr"
-        || stem.contains("ptr")
-        || stem == "wowt"
-        || stem == "wowxptr"
-    {
+    if matches_game(code_str, stem, &["wowt", "wowxptr"], &["ptr"]) {
         return DiscordApp::new(
             APP_ID_WOW_PTR,
             "World of Warcraft Public Test",
@@ -378,16 +338,12 @@ pub fn resolve_game_app(code: &ProductCode, name: &str, custom_id: Option<&str>)
         );
     }
 
-    // WoW Classic / Era / Anniversary
-    if code_str.contains("classic")
-        || code_str == "wowclassic"
-        || code_str.contains("anniversary")
-        || stem.contains("classic")
-        || stem == "wowclassic"
-        || stem == "wow_classic"
-        || stem == "wow_classic_era"
-        || stem.contains("anniversary")
-    {
+    if matches_game(
+        code_str,
+        stem,
+        &["wowclassic", "wow_classic", "wow_classic_era"],
+        &["classic", "anniversary"],
+    ) {
         return DiscordApp::new(
             APP_ID_WOW_CLASSIC,
             "World of Warcraft Classic",
@@ -395,21 +351,17 @@ pub fn resolve_game_app(code: &ProductCode, name: &str, custom_id: Option<&str>)
         );
     }
 
-    // WoW Retail / Other WoW (e.g. turtle_wow)
     if code_str.starts_with("wow")
         || code_str.contains("wow")
         || stem.starts_with("wow")
         || stem.contains("wow")
-        || stem.contains("warcraft")
+        || code_str.contains("world of warcraft")
+        || stem.contains("world of warcraft")
     {
-        return DiscordApp::new(
-            APP_ID_WOW,
-            "World of Warcraft",
-            "World of Warcraft",
-        );
+        return DiscordApp::new(APP_ID_WOW, "World of Warcraft", "World of Warcraft");
     }
 
-    // Unrecognized fallback: use code or clean name
+    // 3. Unrecognized fallback: use code or clean name
     let title = if !code.as_str().is_empty() && code.as_str() != "custom" {
         code.as_str()
     } else if !clean_name.is_empty() {
@@ -418,37 +370,6 @@ pub fn resolve_game_app(code: &ProductCode, name: &str, custom_id: Option<&str>)
         "World of Warcraft"
     };
     DiscordApp::new(APP_ID_WOW, title, "Playing")
-}
-
-fn title_for_code_or_stem(
-    code: &ProductCode,
-    code_str: &str,
-    stem: &str,
-    clean_name: &str,
-) -> String {
-    match code {
-        ProductCode::Forever => "World of Warcraft: Forever".to_owned(),
-        ProductCode::Classic | ProductCode::ClassicEra => "World of Warcraft Classic".to_owned(),
-        ProductCode::Retail => "World of Warcraft".to_owned(),
-        ProductCode::Ptr | ProductCode::Ptr2 => "World of Warcraft Public Test".to_owned(),
-        _ => {
-            if code_str == "s2" || stem.contains("sc2") || stem.contains("starcraft ii") {
-                "StarCraft II".to_owned()
-            } else if code_str == "s1" || stem.contains("remaster") {
-                "StarCraft: Remastered".to_owned()
-            } else if code_str == "sc" || stem == "sc" || stem.contains("starcraft") {
-                "StarCraft".to_owned()
-            } else if code_str == "hsb" || stem.contains("hearthstone") {
-                "Hearthstone".to_owned()
-            } else if code_str == "fen" || stem.contains("diablo iv") {
-                "Diablo IV".to_owned()
-            } else if !code.as_str().is_empty() && code.as_str() != "custom" {
-                code.as_str().to_owned()
-            } else {
-                clean_name.to_owned()
-            }
-        }
-    }
 }
 
 #[cfg(test)]
@@ -490,6 +411,10 @@ mod tests {
         );
         assert_eq!(app_sc.client_id, "987654321");
         assert_eq!(app_sc.title, "StarCraft: Remastered");
+
+        let app_d4 = app_for_product(&ProductCode::Custom("fenris".into()), Some("111222333"));
+        assert_eq!(app_d4.client_id, "111222333");
+        assert_eq!(app_d4.title, "Diablo IV");
     }
 
     #[test]
@@ -533,16 +458,25 @@ mod tests {
     #[test]
     fn hand_off_and_warcraft_games_resolve() {
         assert_eq!(app_for_name("Hearthstone.exe", None).client_id, APP_ID_HEARTHSTONE);
+        assert_eq!(app_for_name("fenris", None).client_id, APP_ID_DIABLO_IV);
         assert_eq!(app_for_name("Diablo IV.exe", None).client_id, APP_ID_DIABLO_IV);
         assert_eq!(app_for_name("Diablo III.exe", None).client_id, APP_ID_DIABLO_3);
         assert_eq!(app_for_name("D2R.exe", None).client_id, APP_ID_DIABLO_2_RESURRECTED);
         assert_eq!(app_for_name("Overwatch.exe", None).client_id, APP_ID_OVERWATCH_2);
         assert_eq!(app_for_name("Heroes.exe", None).client_id, APP_ID_HEROES_OF_THE_STORM);
+        assert_eq!(
+            resolve_game_app(&ProductCode::Custom("hero".into()), "HeroesSwitcher_x64.exe", None).client_id,
+            APP_ID_HEROES_OF_THE_STORM
+        );
         assert_eq!(app_for_name("w1r", None).client_id, APP_ID_WARCRAFT_1_REMASTERED);
+        assert_eq!(app_for_name("Warcraft.exe", None).client_id, APP_ID_WARCRAFT_1_REMASTERED);
         assert_eq!(app_for_name("w2r", None).client_id, APP_ID_WARCRAFT_2_REMASTERED);
+        assert_eq!(app_for_name("Warcraft II.exe", None).client_id, APP_ID_WARCRAFT_2_REMASTERED);
         assert_eq!(app_for_name("w3", None).client_id, APP_ID_WARCRAFT_3_REFORGED);
+        assert_eq!(app_for_name("Warcraft III.exe", None).client_id, APP_ID_WARCRAFT_3_REFORGED);
         assert_eq!(app_for_name("war3.exe", None).client_id, APP_ID_WARCRAFT_3_CLASSIC);
         assert_eq!(app_for_name("wowclassic.exe", None).client_id, APP_ID_WOW_CLASSIC);
+        assert_eq!(app_for_name("wow_anniversary", None).client_id, APP_ID_WOW_CLASSIC);
         assert_eq!(app_for_name("wowt.exe", None).client_id, APP_ID_WOW_PTR);
         assert_eq!(app_for_name("wowf", None).client_id, APP_ID_WOW_FOREVER);
     }

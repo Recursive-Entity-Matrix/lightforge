@@ -702,6 +702,9 @@ mod tests {
         // And a config from before the switch leaves the client running.
         assert!(!old.close_battle_net_on_play);
         assert!(!old.battle_net_in_background);
+        assert!(!old.discord_rpc);
+        assert!(old.discord_rpc_character);
+        assert_eq!(old.discord_app_id, None);
     }
 
     #[test]

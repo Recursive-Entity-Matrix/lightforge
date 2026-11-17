@@ -17,53 +17,47 @@ const OP_CLOSE: u32 = 2;
 const TIMEOUT: Duration = Duration::from_millis(1000);
 const MAX_PACKET_LEN: usize = 64 * 1024;
 
-/// Find an available Discord IPC Unix socket.
-pub fn find_socket() -> Option<PathBuf> {
+const FLATPAK_APPS: &[&str] = &[
+    "com.discordapp.Discord",
+    "com.discordapp.DiscordCanary",
+    "com.discordapp.DiscordPTB",
+    "dev.vencord.Vesktop",
+    "io.github.shifteight.webcord",
+];
+
+/// Return all existing Discord IPC Unix socket candidates in preference order.
+fn find_sockets() -> Vec<PathBuf> {
     let mut candidates = Vec::new();
 
     // 1. Check XDG_RUNTIME_DIR or /run/user/<uid>
     let runtime_dir = std::env::var_os("XDG_RUNTIME_DIR")
         .map(PathBuf::from)
         .or_else(|| {
+            // SAFETY: getuid(2) is always safe to call and never fails.
             let uid = unsafe { libc::getuid() };
             let p = PathBuf::from(format!("/run/user/{uid}"));
             p.exists().then_some(p)
         });
 
     if let Some(ref dir) = runtime_dir {
-        // Direct sockets
         for i in 0..10 {
             candidates.push(dir.join(format!("discord-ipc-{i}")));
         }
-        // Flatpak app runtimes
-        for app in &[
-            "com.discordapp.Discord",
-            "com.discordapp.DiscordCanary",
-            "com.discordapp.DiscordPTB",
-            "dev.vencord.Vesktop",
-            "io.github.shifteight.webcord",
-        ] {
+        for app in FLATPAK_APPS {
             for i in 0..10 {
                 candidates.push(dir.join(format!("app/{app}/discord-ipc-{i}")));
                 candidates.push(dir.join(format!(".flatpak/{app}/xdg-run/discord-ipc-{i}")));
             }
         }
-        // Snap
         for i in 0..10 {
             candidates.push(dir.join(format!("snap.discord/discord-ipc-{i}")));
         }
     }
 
     // 2. Check ~/.var/app (Flatpak home directory)
-    if let Ok(home) = std::env::var("HOME") {
+    if let Some(home) = std::env::var_os("HOME") {
         let home_dir = PathBuf::from(home);
-        for app in &[
-            "com.discordapp.Discord",
-            "com.discordapp.DiscordCanary",
-            "com.discordapp.DiscordPTB",
-            "dev.vencord.Vesktop",
-            "io.github.shifteight.webcord",
-        ] {
+        for app in FLATPAK_APPS {
             for i in 0..10 {
                 candidates.push(home_dir.join(format!(".var/app/{app}/xdg-run/discord-ipc-{i}")));
             }
@@ -75,24 +69,53 @@ pub fn find_socket() -> Option<PathBuf> {
         candidates.push(PathBuf::from(format!("/tmp/discord-ipc-{i}")));
     }
 
-    candidates.into_iter().find(|p| p.exists())
+    candidates.into_iter().filter(|p| p.exists()).collect()
+}
+
+/// Find the first available Discord IPC Unix socket.
+pub fn find_socket() -> Option<PathBuf> {
+    find_sockets().into_iter().next()
 }
 
 /// A connection to a local Discord client.
 pub struct DiscordIpc {
     stream: UnixStream,
     client_id: String,
+    closed: bool,
 }
 
 impl DiscordIpc {
     /// Connect to Discord using the given `client_id` (Discord Application ID).
     pub fn connect(client_id: &str) -> io::Result<Self> {
-        let path = find_socket().ok_or_else(|| {
-            io::Error::new(io::ErrorKind::NotFound, "no Discord IPC socket found")
-        })?;
+        let sockets = find_sockets();
+        if sockets.is_empty() {
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                "no Discord IPC socket found",
+            ));
+        }
 
-        tracing::info!("connecting to Discord IPC at {}", path.display());
-        let mut stream = UnixStream::connect(&path)?;
+        let mut last_err = None;
+        for path in sockets {
+            tracing::debug!("trying Discord IPC at {}", path.display());
+            match UnixStream::connect(&path).and_then(|s| Self::handshake(s, client_id)) {
+                Ok(client) => {
+                    tracing::info!("connected to Discord IPC at {}", path.display());
+                    return Ok(client);
+                }
+                Err(e) => {
+                    tracing::debug!("Discord IPC candidate {} failed: {e}", path.display());
+                    last_err = Some(e);
+                }
+            }
+        }
+
+        Err(last_err.unwrap_or_else(|| {
+            io::Error::new(io::ErrorKind::NotFound, "no Discord IPC socket found")
+        }))
+    }
+
+    fn handshake(mut stream: UnixStream, client_id: &str) -> io::Result<Self> {
         stream.set_read_timeout(Some(TIMEOUT))?;
         stream.set_write_timeout(Some(TIMEOUT))?;
 
@@ -117,13 +140,17 @@ impl DiscordIpc {
 
         let resp: serde_json::Value = serde_json::from_slice(&reply)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+        if resp.get("evt").and_then(|v| v.as_str()) == Some("ERROR") {
+            return Err(io::Error::other(format!("Discord handshake error: {resp:?}")));
+        }
         if resp.get("evt").and_then(|v| v.as_str()) != Some("READY") {
-            tracing::info!("Discord handshake response: {resp:?}");
+            tracing::debug!("Discord handshake response: {resp:?}");
         }
 
         Ok(Self {
             stream,
             client_id: client_id.to_owned(),
+            closed: false,
         })
     }
 
@@ -147,7 +174,7 @@ impl DiscordIpc {
 
         send_packet(&mut self.stream, OP_FRAME, &data)?;
 
-        // Check the reply to verify whether Discord accepted the activity
+        // Check the reply to verify whether Discord accepted the activity or closed the socket.
         match read_packet(&mut self.stream) {
             Ok((_op, reply)) => {
                 let resp: serde_json::Value = serde_json::from_slice(&reply).unwrap_or_default();
@@ -155,19 +182,23 @@ impl DiscordIpc {
                     tracing::warn!("Discord SET_ACTIVITY error: {resp:?}");
                     return Err(io::Error::other(format!("Discord error: {resp:?}")));
                 }
-                tracing::info!("Discord SET_ACTIVITY accepted: {resp:?}");
+                tracing::debug!("Discord SET_ACTIVITY accepted: {resp:?}");
             }
-            Err(e) => {
-                tracing::debug!("Discord SET_ACTIVITY reply read note: {e}");
+            Err(e) if matches!(e.kind(), io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut) => {
+                tracing::debug!("Discord SET_ACTIVITY reply timed out: {e}");
             }
+            Err(e) => return Err(e),
         }
         Ok(())
     }
 
     /// Cleanly close the Discord IPC connection.
     pub fn close(&mut self) {
-        let _ = send_packet(&mut self.stream, OP_CLOSE, b"{}");
-        let _ = self.stream.shutdown(std::net::Shutdown::Both);
+        if !self.closed {
+            self.closed = true;
+            let _ = send_packet(&mut self.stream, OP_CLOSE, b"{}");
+            let _ = self.stream.shutdown(std::net::Shutdown::Both);
+        }
     }
 }
 
@@ -222,5 +253,54 @@ mod tests {
         let (op, received) = read_packet(&mut server).unwrap();
         assert_eq!(op, OP_FRAME);
         assert_eq!(received, payload);
+    }
+
+    #[test]
+    fn handshake_and_set_activity_round_trip() {
+        let (client_stream, mut server_stream) = UnixStream::pair().unwrap();
+
+        let server = std::thread::spawn(move || {
+            let (op, body) = read_packet(&mut server_stream).unwrap();
+            assert_eq!(op, OP_HANDSHAKE);
+            let req: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(req["client_id"], "12345");
+            send_packet(&mut server_stream, OP_FRAME, br#"{"evt":"READY"}"#).unwrap();
+
+            let (op, body) = read_packet(&mut server_stream).unwrap();
+            assert_eq!(op, OP_FRAME);
+            let act: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(act["cmd"], "SET_ACTIVITY");
+            send_packet(&mut server_stream, OP_FRAME, br#"{"cmd":"SET_ACTIVITY"}"#).unwrap();
+
+            let (op, _) = read_packet(&mut server_stream).unwrap();
+            assert_eq!(op, OP_CLOSE);
+            // Closing twice / dropping must not send a second OP_CLOSE.
+            assert!(read_packet(&mut server_stream).is_err());
+        });
+
+        let mut ipc = DiscordIpc::handshake(client_stream, "12345").unwrap();
+        let activity = Activity::new(Some("Arthas".into()), Some("In World".into()), Some(100));
+        ipc.set_activity(42, Some(&activity)).unwrap();
+        ipc.close();
+        drop(ipc);
+
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn set_activity_returns_err_when_peer_closes() {
+        let (client_stream, mut server_stream) = UnixStream::pair().unwrap();
+        let server = std::thread::spawn(move || {
+            let _ = read_packet(&mut server_stream).unwrap();
+            send_packet(&mut server_stream, OP_FRAME, br#"{"evt":"READY"}"#).unwrap();
+            let _ = read_packet(&mut server_stream).unwrap();
+            drop(server_stream);
+        });
+
+        let mut ipc = DiscordIpc::handshake(client_stream, "12345").unwrap();
+        let activity = Activity::new(Some("Arthas".into()), None, None);
+        assert!(ipc.set_activity(42, Some(&activity)).is_err());
+
+        server.join().unwrap();
     }
 }

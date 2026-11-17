@@ -14,13 +14,15 @@ use crate::paths::Layout;
 /// start. Slower than [`super::POLL`]: a cold client takes most of a minute.
 const HANDOFF_POLL: Duration = Duration::from_millis(500);
 
-/// Wine's own processes, in every prefix and nobody's game. The
-/// before-snapshot catches most, but Wine starts services on demand too.
+/// Wine's own processes and Battle.net helpers, in every prefix and nobody's
+/// game. The before-snapshot catches most, but Wine starts services on demand too.
 ///
-/// The last four outlive the game: `steam.exe` is Proton's shim, `xalia.exe`
-/// GE-Proton's accessibility helper, `lsass.exe` comes with a login and
-/// `rundll32.exe` with the shell. Counted as games, they refused every later Play.
-const WINE_SERVICES: [&str; 21] = [
+/// `steam.exe` (Proton's shim), `xalia.exe` (GE-Proton's accessibility helper),
+/// `lsass.exe`, and `rundll32.exe` outlive the game and would refuse every later
+/// Play if counted as games; `wine64-preloader` / `wine-preloader` appear when
+/// `argv` is empty, and `SystemSurvey.exe` / `crashpad_handler.exe` are Blizzard
+/// telemetry/crash helpers spawned during Battle.net hand-offs.
+const WINE_SERVICES: [&str; 20] = [
     "services",
     "winedevice",
     "plugplay",
@@ -39,7 +41,6 @@ const WINE_SERVICES: [&str; 21] = [
     "rundll32",
     "wine64-preloader",
     "wine-preloader",
-    "wineserver",
     "systemsurvey",
     "crashpad_handler",
 ];

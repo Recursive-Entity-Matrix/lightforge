@@ -46,7 +46,7 @@ impl Lightforge {
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_secs())
                 .unwrap_or(0);
-            let product_dir = match Kind::of(&code) {
+            let product_dir = match self.kind_of(&code) {
                 Kind::Managed => Some(self.layout.product_dir(&code)),
                 Kind::HandOff => None,
             };
