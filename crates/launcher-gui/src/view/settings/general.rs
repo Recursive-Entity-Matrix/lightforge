@@ -159,18 +159,16 @@ impl Lightforge {
                     "Discord Rich Presence",
                     "Shows what game you are playing on Discord.",
                     self.hint(
-                        "Lightforge communicates directly with your local Discord client \
-                         via a local IPC socket. It only runs for the game itself, never for \
-                         the Battle.net launcher, and stays completely outside the game's memory.",
+                        "Lightforge communicates directly with your local Discord client via a local IPC socket.",
                     ),
                     switch("discord rpc", self.config.discord_rpc, Message::DiscordRpc),
                 ),
                 match self.config.discord_rpc {
                     true => setting(
                         "Show character and realm in Discord",
-                        "Includes your character and realm name when playing World of Warcraft.",
+                        "Includes your character information and realm name when playing World of Warcraft.",
                         self.hint(
-                            "Discovered non-invasively from your WTF settings and account folder.",
+                            "Discovered non-invasively from your game settings and log files.",
                         ),
                         switch("discord character", self.config.discord_rpc_character, Message::DiscordRpcCharacter),
                     ),
