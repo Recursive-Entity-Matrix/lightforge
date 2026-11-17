@@ -212,10 +212,7 @@ fn run_worker(rx: Receiver<Command>, mut enabled: bool, mut include_character: b
 }
 
 fn resolve_app(game: &ActiveGame) -> DiscordApp {
-    match &game.code {
-        ProductCode::Custom(_) => apps::app_for_name(&game.name, game.custom_app_id.as_deref()),
-        code => apps::app_for_product(code, game.custom_app_id.as_deref()),
-    }
+    apps::resolve_game_app(&game.code, &game.name, game.custom_app_id.as_deref())
 }
 
 fn build_activity(game: &ActiveGame, app: &DiscordApp, include_character: bool) -> Activity {

@@ -20,7 +20,7 @@ const HANDOFF_POLL: Duration = Duration::from_millis(500);
 /// The last four outlive the game: `steam.exe` is Proton's shim, `xalia.exe`
 /// GE-Proton's accessibility helper, `lsass.exe` comes with a login and
 /// `rundll32.exe` with the shell. Counted as games, they refused every later Play.
-const WINE_SERVICES: [&str; 16] = [
+const WINE_SERVICES: [&str; 21] = [
     "services",
     "winedevice",
     "plugplay",
@@ -37,6 +37,11 @@ const WINE_SERVICES: [&str; 16] = [
     "xalia",
     "lsass",
     "rundll32",
+    "wine64-preloader",
+    "wine-preloader",
+    "wineserver",
+    "systemsurvey",
+    "crashpad_handler",
 ];
 
 /// A process in the prefix that is neither Battle.net's nor Wine's: after a
