@@ -2382,3 +2382,25 @@ fn a_battle_net_repair_waits_for_a_running_setup() {
     let _ = app.update(Message::RepairBattleNet);
     assert!(app.error.is_some());
 }
+
+#[test]
+fn discord_rpc_session_is_lazy_and_disposed_when_disabled() {
+    let (mut app, _scratch) = test_app();
+    app.dirs = None;
+    assert!(app.discord.is_none(), "no worker thread while disabled");
+
+    app.playing.push(Session {
+        code: ProductCode::Retail,
+        game: lightforge_core::preflight::GameProcess { pid: 1234, name: "Wow.exe".to_owned() },
+        started_at: 1000,
+        stopping: false,
+    });
+
+    let _ = app.update(Message::DiscordRpc(true));
+    assert!(app.config.discord_rpc);
+    assert!(app.discord.is_some());
+
+    let _ = app.update(Message::DiscordRpc(false));
+    assert!(!app.config.discord_rpc);
+    assert!(app.discord.is_none());
+}

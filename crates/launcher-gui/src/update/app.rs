@@ -205,8 +205,27 @@ impl Lightforge {
 
             Message::DiscordRpc(on) => {
                 self.config.discord_rpc = on;
-                if let Some(discord) = &self.discord {
-                    discord.update_config(on, self.config.discord_rpc_character);
+                if on {
+                    let discord = self
+                        .discord
+                        .get_or_insert_with(|| {
+                            lightforge_core::discord::DiscordRpcSession::start(
+                                self.config.discord_rpc_character,
+                            )
+                        })
+                        .clone();
+                    for session in &self.playing {
+                        let product_dir = self.discord_product_dir(&session.code);
+                        discord.game_started(
+                            session.code.clone(),
+                            session.game.name.clone(),
+                            session.game.pid,
+                            session.started_at,
+                            product_dir,
+                        );
+                    }
+                } else {
+                    self.discord = None;
                 }
                 self.save_config();
                 Task::none()
@@ -215,7 +234,7 @@ impl Lightforge {
             Message::DiscordRpcCharacter(on) => {
                 self.config.discord_rpc_character = on;
                 if let Some(discord) = &self.discord {
-                    discord.update_config(self.config.discord_rpc, on);
+                    discord.set_include_character(on);
                 }
                 self.save_config();
                 Task::none()

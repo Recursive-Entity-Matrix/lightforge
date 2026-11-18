@@ -12,12 +12,12 @@ use std::time::{Duration, Instant};
 
 use super::activity::Activity;
 use super::apps::{self, DiscordApp};
-use super::character;
+use super::character::{self, CharacterCache};
 use super::ipc::DiscordIpc;
 use crate::product::ProductCode;
 
 const RECONNECT_INTERVAL: Duration = Duration::from_secs(10);
-const LOOP_POLL_TIMEOUT: Duration = Duration::from_secs(3);
+const LOOP_POLL_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Clone)]
 struct ActiveGame {
@@ -26,16 +26,12 @@ struct ActiveGame {
     pid: u32,
     start_secs: u64,
     product_dir: Option<PathBuf>,
-    custom_app_id: Option<String>,
 }
 
 enum Command {
     GameStarted(ActiveGame),
     GameExited(ProductCode),
-    ConfigChanged {
-        enabled: bool,
-        include_character: bool,
-    },
+    IncludeCharacter(bool),
     Shutdown,
 }
 
@@ -58,6 +54,9 @@ impl Drop for SessionInner {
 }
 
 /// A handle to the background Discord RPC manager.
+///
+/// Dropping the last clone shuts down the worker thread and closes the Discord
+/// IPC socket cleanly.
 #[derive(Clone)]
 pub struct DiscordRpcSession {
     inner: Arc<SessionInner>,
@@ -65,12 +64,12 @@ pub struct DiscordRpcSession {
 
 impl DiscordRpcSession {
     /// Start the background Discord RPC manager thread.
-    pub fn start(enabled: bool, include_character: bool) -> Self {
+    pub fn start(include_character: bool) -> Self {
         let (tx, rx) = mpsc::channel();
 
         let handle = std::thread::Builder::new()
             .name("discord-rpc".into())
-            .spawn(move || run_worker(rx, enabled, include_character))
+            .spawn(move || run_worker(rx, include_character))
             .expect("failed to spawn discord-rpc thread");
 
         Self {
@@ -89,7 +88,6 @@ impl DiscordRpcSession {
         pid: u32,
         start_secs: u64,
         product_dir: Option<PathBuf>,
-        custom_app_id: Option<String>,
     ) {
         let _ = self.inner.tx.send(Command::GameStarted(ActiveGame {
             code,
@@ -97,7 +95,6 @@ impl DiscordRpcSession {
             pid,
             start_secs,
             product_dir,
-            custom_app_id,
         }));
     }
 
@@ -106,12 +103,9 @@ impl DiscordRpcSession {
         let _ = self.inner.tx.send(Command::GameExited(code));
     }
 
-    /// Update configuration toggles (e.g. from Settings).
-    pub fn update_config(&self, enabled: bool, include_character: bool) {
-        let _ = self.inner.tx.send(Command::ConfigChanged {
-            enabled,
-            include_character,
-        });
+    /// Update whether WoW character and realm details are included.
+    pub fn set_include_character(&self, include_character: bool) {
+        let _ = self.inner.tx.send(Command::IncludeCharacter(include_character));
     }
 
     /// Stop the background worker.
@@ -120,19 +114,20 @@ impl DiscordRpcSession {
     }
 }
 
-fn run_worker(rx: Receiver<Command>, mut enabled: bool, mut include_character: bool) {
+fn run_worker(rx: Receiver<Command>, mut include_character: bool) {
     let mut games: Vec<ActiveGame> = Vec::new();
     let mut ipc: Option<DiscordIpc> = None;
     let mut last_attempt = Instant::now() - RECONNECT_INTERVAL;
     let mut dirty = false;
     let mut last_activity: Option<Activity> = None;
+    let mut char_cache = CharacterCache::default();
 
     loop {
-        // Block without polling when RPC is disabled or no game is running.
-        let recv = if enabled && !games.is_empty() {
-            rx.recv_timeout(LOOP_POLL_TIMEOUT)
-        } else {
+        // Block without polling when no game is running.
+        let recv = if games.is_empty() {
             rx.recv().map_err(|_| RecvTimeoutError::Disconnected)
+        } else {
+            rx.recv_timeout(LOOP_POLL_TIMEOUT)
         };
 
         match recv {
@@ -144,55 +139,44 @@ fn run_worker(rx: Receiver<Command>, mut enabled: bool, mut include_character: b
                 );
                 games.retain(|g| g.code != game.code);
                 games.push(game);
+                char_cache = CharacterCache::default();
                 dirty = true;
                 last_attempt = Instant::now() - RECONNECT_INTERVAL;
             }
             Ok(Command::GameExited(code)) => {
                 tracing::info!("Discord RPC received GameExited for {}", code.as_str());
                 games.retain(|g| g.code != code);
+                char_cache = CharacterCache::default();
                 dirty = true;
                 last_attempt = Instant::now() - RECONNECT_INTERVAL;
             }
-            Ok(Command::ConfigChanged {
-                enabled: new_enabled,
-                include_character: new_include_char,
-            }) => {
-                if enabled != new_enabled || include_character != new_include_char {
+            Ok(Command::IncludeCharacter(new_include_char)) => {
+                if include_character != new_include_char {
                     tracing::info!(
-                        "Discord RPC config updated: enabled={new_enabled}, include_character={new_include_char}"
+                        "Discord RPC character toggle updated: include_character={new_include_char}"
                     );
-                    enabled = new_enabled;
                     include_character = new_include_char;
                     dirty = true;
-                    if enabled {
-                        last_attempt = Instant::now() - RECONNECT_INTERVAL;
-                    }
                 }
             }
             Ok(Command::Shutdown) | Err(RecvTimeoutError::Disconnected) => break,
-            Err(RecvTimeoutError::Timeout) => {
-                // Periodic loop: check if character info or game activity changed
-            }
+            Err(RecvTimeoutError::Timeout) => {}
         }
 
-        if !enabled || games.is_empty() {
+        let Some(active) = games.last() else {
             if let Some(mut client) = ipc.take() {
                 client.close();
             }
             dirty = false;
             last_activity = None;
             continue;
-        }
-
-        let Some(active) = games.last() else {
-            continue;
         };
 
-        let app = resolve_app(active);
+        let app = apps::resolve_game_app(&active.code, &active.name);
 
-        // Check if existing IPC matches the target application
+        // Drop stale connections if Discord closed/restarted or the target App ID changed.
         if let Some(client) = &ipc {
-            if client.client_id() != app.client_id.as_str() {
+            if client.client_id() != app.client_id.as_str() || !client.is_alive() {
                 ipc = None;
                 dirty = true;
                 last_activity = None;
@@ -200,7 +184,7 @@ fn run_worker(rx: Receiver<Command>, mut enabled: bool, mut include_character: b
             }
         }
 
-        // Attempt connection if not connected and reconnect interval elapsed
+        // Attempt connection if not connected and reconnect interval elapsed.
         if ipc.is_none() && last_attempt.elapsed() >= RECONNECT_INTERVAL {
             last_attempt = Instant::now();
             match DiscordIpc::connect(&app.client_id) {
@@ -215,14 +199,14 @@ fn run_worker(rx: Receiver<Command>, mut enabled: bool, mut include_character: b
             }
         }
 
-        // Update presence if connected and state changed
+        // Update presence if connected and state changed.
         if let Some(client) = ipc.as_mut() {
-            let activity = build_activity(active, &app, include_character);
+            let activity = build_activity(active, &app, include_character, &mut char_cache);
             if dirty || last_activity.as_ref() != Some(&activity) {
                 tracing::debug!("setting Discord activity: {activity:?}");
                 if let Err(e) = client.set_activity(std::process::id(), Some(&activity)) {
                     tracing::warn!("failed to send activity to Discord: {e}");
-                    ipc = None; // Connection broken, retry later
+                    ipc = None;
                     last_activity = None;
                 } else {
                     last_activity = Some(activity);
@@ -237,15 +221,16 @@ fn run_worker(rx: Receiver<Command>, mut enabled: bool, mut include_character: b
     }
 }
 
-fn resolve_app(game: &ActiveGame) -> DiscordApp {
-    apps::resolve_game_app(&game.code, &game.name, game.custom_app_id.as_deref())
-}
-
-fn build_activity(game: &ActiveGame, app: &DiscordApp, include_character: bool) -> Activity {
+fn build_activity(
+    game: &ActiveGame,
+    app: &DiscordApp,
+    include_character: bool,
+    char_cache: &mut CharacterCache,
+) -> Activity {
     let char_info = if include_character && apps::is_wow_app(app) {
         game.product_dir
             .as_deref()
-            .and_then(|p| character::detect_character_with_start_time(p, Some(game.start_secs)))
+            .and_then(|p| character::detect_character_cached(p, Some(game.start_secs), char_cache))
     } else {
         None
     };

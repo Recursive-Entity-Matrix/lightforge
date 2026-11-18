@@ -78,9 +78,6 @@ pub struct Config {
     /// Whether Discord Rich Presence includes character and realm names when available.
     #[serde(default = "yes")]
     pub discord_rpc_character: bool,
-    /// Optional global custom Discord Application ID.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub discord_app_id: Option<String>,
     /// Whether the launcher minimizes once a game is up. Off by default;
     /// nothing is restored when the game exits.
     #[serde(default)]
@@ -200,7 +197,6 @@ impl Default for Config {
             pause_downloads_while_playing: true,
             discord_rpc: false,
             discord_rpc_character: true,
-            discord_app_id: None,
             minimize_on_launch: false,
             battle_net_minimized: true,
             close_battle_net_on_play: false,
@@ -704,7 +700,6 @@ mod tests {
         assert!(!old.battle_net_in_background);
         assert!(!old.discord_rpc);
         assert!(old.discord_rpc_character);
-        assert_eq!(old.discord_app_id, None);
     }
 
     #[test]

@@ -29,6 +29,14 @@ impl Lightforge {
         self.busy || !self.playing.is_empty()
     }
 
+    /// Directory passed to Discord character detection for managed WoW installs.
+    pub(crate) fn discord_product_dir(&self, code: &ProductCode) -> Option<PathBuf> {
+        match self.kind_of(code) {
+            Kind::Managed => Some(self.layout.product_dir(code)),
+            Kind::HandOff => None,
+        }
+    }
+
     /// The launched game is up: its tile turns to STOP, and the launcher is
     /// free for another game while this one runs.
     pub(crate) fn game_up(
@@ -37,25 +45,22 @@ impl Lightforge {
         settle_after: Option<u64>,
     ) -> Task<Message> {
         let code = self.launching.take().unwrap_or_else(|| self.selected.code.clone());
+        let started_at = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
         self.busy = false;
         self.status = format!("{} is running", game.name);
         self.playing.retain(|s| s.code != code);
-        self.playing.push(Session { code: code.clone(), game: game.clone(), stopping: false });
+        self.playing.push(Session {
+            code: code.clone(),
+            game: game.clone(),
+            started_at,
+            stopping: false,
+        });
+        let product_dir = self.discord_product_dir(&code);
         if let Some(discord) = &self.discord {
-            let start_secs = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_secs())
-                .unwrap_or(0);
-            let product_dir = match self.kind_of(&code) {
-                Kind::Managed => Some(self.layout.product_dir(&code)),
-                Kind::HandOff => None,
-            };
-            let custom_app_id = self
-                .config
-                .product(&code)
-                .and_then(|p| p.profile.discord_app_id.clone())
-                .or_else(|| self.config.discord_app_id.clone());
-            discord.game_started(code.clone(), game.name.clone(), game.pid, start_secs, product_dir, custom_app_id);
+            discord.game_started(code.clone(), game.name.clone(), game.pid, started_at, product_dir);
         }
         // After the game, so its pre-flight is long done and cannot end them.
         let companions: Vec<Task<Message>> = self

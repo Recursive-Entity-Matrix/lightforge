@@ -312,6 +312,8 @@ pub(crate) enum Launch {
 pub(crate) struct Session {
     pub(crate) code: ProductCode,
     pub(crate) game: lightforge_core::preflight::GameProcess,
+    /// Unix timestamp (seconds) when the session started.
+    pub(crate) started_at: u64,
     /// STOP was confirmed and the game has been told to go.
     pub(crate) stopping: bool,
 }

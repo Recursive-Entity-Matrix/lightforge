@@ -4,6 +4,7 @@
 //! Discord IPC framing: 4-byte opcode (LE) + 4-byte length (LE) + JSON payload.
 
 use std::io::{self, Read, Write};
+use std::os::fd::AsRawFd;
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -159,6 +160,43 @@ impl DiscordIpc {
         &self.client_id
     }
 
+    /// Non-blocking check whether the local Discord IPC socket is still open.
+    pub fn is_alive(&self) -> bool {
+        if self.closed {
+            return false;
+        }
+        let fd = self.stream.as_raw_fd();
+        let mut pfd = libc::pollfd {
+            fd,
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        // SAFETY: one valid pollfd referencing `self.stream`, zero timeout.
+        let rc = unsafe { libc::poll(&mut pfd, 1, 0) };
+        if rc < 0 {
+            return false;
+        }
+        if (pfd.revents & (libc::POLLHUP | libc::POLLERR | libc::POLLNVAL)) != 0 {
+            return false;
+        }
+        if (pfd.revents & libc::POLLIN) != 0 {
+            let mut byte = [0u8; 1];
+            // SAFETY: valid open socket fd, 1-byte stack buffer, non-blocking peek.
+            let n = unsafe {
+                libc::recv(
+                    fd,
+                    byte.as_mut_ptr().cast(),
+                    1,
+                    libc::MSG_PEEK | libc::MSG_DONTWAIT,
+                )
+            };
+            if n == 0 {
+                return false;
+            }
+        }
+        true
+    }
+
     /// Set or clear the Discord Rich Presence activity.
     pub fn set_activity(&mut self, pid: u32, activity: Option<&Activity>) -> io::Result<()> {
         let payload = serde_json::json!({
@@ -302,5 +340,22 @@ mod tests {
         assert!(ipc.set_activity(42, Some(&activity)).is_err());
 
         server.join().unwrap();
+    }
+
+    #[test]
+    fn is_alive_detects_peer_disconnect() {
+        let (client_stream, mut server_stream) = UnixStream::pair().unwrap();
+        let server = std::thread::spawn(move || {
+            let _ = read_packet(&mut server_stream).unwrap();
+            send_packet(&mut server_stream, OP_FRAME, br#"{"evt":"READY"}"#).unwrap();
+            server_stream
+        });
+
+        let ipc = DiscordIpc::handshake(client_stream, "12345").unwrap();
+        assert!(ipc.is_alive());
+
+        let server_stream = server.join().unwrap();
+        drop(server_stream);
+        assert!(!ipc.is_alive());
     }
 }

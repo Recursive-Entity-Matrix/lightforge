@@ -49,7 +49,6 @@ pub(crate) fn play(ctx: Ctx, code: ProductCode, proton: Option<String>, dry_run:
     let mut cmd = launch.command();
     let status = if config.discord_rpc {
         let session = lightforge_core::discord::DiscordRpcSession::start(
-            true,
             config.discord_rpc_character,
         );
         let start_secs = std::time::SystemTime::now()
@@ -63,17 +62,12 @@ pub(crate) fn play(ctx: Ctx, code: ProductCode, proton: Option<String>, dry_run:
             .unwrap_or_else(|| "game".into());
 
         let mut child = cmd.spawn().context("launching the game")?;
-        let custom_app_id = config
-            .product(&code)
-            .and_then(|p| p.profile.discord_app_id.clone())
-            .or_else(|| config.discord_app_id.clone());
         session.game_started(
             code.clone(),
             name,
             child.id(),
             start_secs,
             Some(layout.product_dir(&code)),
-            custom_app_id,
         );
         let status = child.wait().context("waiting for the game")?;
         session.game_exited(code);
